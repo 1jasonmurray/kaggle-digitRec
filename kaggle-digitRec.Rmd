@@ -1,0 +1,7 @@
+---
+title: "kaggle-digitRec"
+author: "Jason Murray"
+date: '2017-03-31'
+output: html_document
+---
+
