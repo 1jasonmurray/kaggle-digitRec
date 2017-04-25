@@ -3,5 +3,268 @@ title: "kaggle-digitRec"
 author: "Jason Murray"
 date: '2017-03-31'
 output: html_document
----
+--- 
+
+##Summary
+
+####Required Libraries
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(parallel)
+library(doParallel)
+```
+
+
+####Data Load and Cleaning
+
+Data was obtained from the kagggle challenge website:    
+https://www.kaggle.com/c/digit-recognizer/data
+<br>
+
+```{r}
+## Data was obtained from the kagggle challenge website
+## https://www.kaggle.com/c/digit-recognizer/data
+
+##Data
+trainfile <- "./data/train.csv"
+testfile <- "./data/test.csv"
+
+##Read data
+trainData <- read.csv(trainfile, stringsAsFactors = FALSE)
+testData <- read.csv(testfile, stringsAsFactors = FALSE)
+
+```
+
+Some initial exploration
+```{r}
+sum(sapply(trainData,function(x) sum(is.na(x))))
+
+hist(trainData$label)
+```
+
+
+Let's take a look at some of the images
+```{r}
+image1 <- matrix(as.integer(trainData[1,2:785]),28,28, byrow = TRUE)
+image2 <- matrix(as.integer(trainData[2,2:785]),28,28, byrow = TRUE)
+image3 <- matrix(as.integer(trainData[3,2:785]),28,28, byrow = TRUE)
+image4 <- matrix(as.integer(trainData[4,2:785]),28,28, byrow = TRUE)
+
+image(image1,col = grey(seq(1, 0, length = 256)), axes=FALSE)
+image(image2,col = grey(seq(1, 0, length = 256)), axes=FALSE)
+image(image3,col = grey(seq(1, 0, length = 256)), axes=FALSE)
+image(image4,col = grey(seq(1, 0, length = 256)), axes=FALSE)
+
+```
+
+##Feature Engineering
+
+I wanted to see if there were any feautres I could add that might be valuable.
+
+The first idea I had was to see if the total amount of area filled might vary by digit.
+
+```{r}
+##copy of trainData to explore
+trainDataFE <- trainData
+
+##add new column with total of all pixels.  
+trainDataFE$totalValue <- rowSums(trainDataFE[,2:785])
+
+```
+
+##Can I look at the image
+
+I was thinking about how my brain might make sense of the picture to decipher the number.  I was wondering if there was a way to look at the image and thought about converting it to points and drawing a regression line, then using the slope and intercept to seperate the numbers.  
+
+```{r}
+##Function to convert image matrix to points and return slope and intercept of a linear model
+image2points <- function(imageName) {
+image <- imageName>200
+points_image <- data.frame(x = numeric(),y = numeric())
+x <- 1
+y <- 28
+while (x<29){
+		while(y>0){
+			if(image[29-y,x]) {
+				new <- data.frame(x=x, y=y)
+				points_image <- rbind(points_image, new)}
+			y <- y-1}
+	x <- x+1
+	y <- 28}
+
+lm(data=points_image, y~x)$coefficients
+}
+
+```
+
+
+
+
+##Testing
+
+Going to alter the test and train data to add the features above
+```{r}
+##Add the coefficients and intercept to the training data frame
+row <- dim(trainData)[1]
+coefs <- data.frame(Intercept=numeric(), x=numeric())
+
+while(row>0){
+	image <- matrix(as.integer(trainData[row,2:785]),28,28, byrow = TRUE)
+	coef <- image2points(image)
+	coefs <- rbind(coef, coefs)
+	row <- row - 1
+}
+
+names(coefs) <- c('intercept','slope')
+
+trainData <- cbind(trainData,coefs)
+
+## update test data with new values as well for prediction.
+
+row <- dim(testData)[1]
+coefs <- data.frame(Intercept=numeric(), x=numeric())
+
+while(row>0){
+	image <- matrix(as.integer(testData[row,1:784]),28,28, byrow = TRUE)
+	coef <- image2points(image)
+	coefs <- rbind(coef, coefs)
+	row <- row - 1
+}
+
+names(coefs) <- c('intercept','slope')
+
+testData <- cbind(testData,coefs)
+
+
+```
+
+
+
+The data is in good shape, I'm going to factorize the label and hold back 30% of the training data for validation testing of models.
+```{r}
+##Factorize
+trainData$label <- as.factor(trainData$label)
+
+##Split our validation set
+inTrain <- createDataPartition(trainData$label, p = 0.7, list = F)
+train <- trainData[inTrain,]
+validate <- trainData[-inTrain,]
+
+##Seperate validation data to test predictions
+validate_testset <- validate %>% select(-label)
+validate_label <- validate %>% select(label)
+
+```
+
+
+I'm going to start with an svm model on the data as is and see how it does.  I would like to have a baseline on just the raw data in case I want to try some feature engineering.     
+
+First I'll turn on the parallel processing
+```{r, message=FALSE, warning=FALSE}
+## Set up parallel processing
+cluster <- makeCluster(detectCores() - 1) 
+registerDoParallel(cluster)
+```
+
+
+
+####Radial Support Vector Machine    
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+##Generate first model
+set.seed(93)
+#svm_ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 3, allowParallel=TRUE)
+svm_ctrl <- trainControl(allowParallel=TRUE)
+svm_tunegrid <- expand.grid(C=c(10),sigma=1.624084e-07)
+model_svm <- train(label ~ ., data=train, method='svmRadial', trControl = svm_ctrl, tuneGrid = svm_tunegrid)
+```
+
+```{r}
+model_svm
+plot(model_svm)
+```
+
+ 
+
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+##Make predictions and show confustion matrix
+pred_svm <- predict(model_svm, newdata=validate_testset)
+confusionMatrix(pred_svm,validate$label)
+```
+
+
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+## Create test predictions for challenge
+pred_svm <- predict(model_svm, newdata=testData)
+
+digitRecSubmission_svm <- data_frame(ImageId = 1:28000, Label = (as.numeric(pred_svm)-1))
+write.csv(digitRecSubmission_svm, file = "digitRec_svm.csv", row.names = FALSE)
+
+```
+
+Got .96743 on the test submission
+
+
+
+####k-nearest neighbours 
+
+Going to try knn
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+##Build model
+set.seed(94)
+knn_ctrl <- trainControl(allowParallel=TRUE)
+model_knn <- train(label ~ ., data=train, method='knn', trControl = knn_ctrl)
+```
+
+
+Predictions on vaidation data
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+##Make predictions and show confustion matrix
+pred_knn <- predict(model_knn, newdata=validate_testset)
+confusionMatrix(pred_knn,validate$label)
+```
+
+Challenge predictions
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+pred_knn <- predict(model_knn, newdata=testData)
+
+digitRecSubmission_knn <- data_frame(ImageId = 1:28000, Label = (as.numeric(pred_knn)-1))
+write.csv(digitRecSubmission_knn, file = "digitRec_knn.csv", row.names = FALSE)
+
+```
+
+
+####Going to try nnet
+
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+##Build model
+set.seed(94)
+nnet_ctrl <- trainControl(allowParallel=TRUE)
+nnet_tunegrid <- expand.grid(size=c(20), decay=5e-4)
+model_nnet <- train(label ~ ., data=train, method='nnet', MaxNWts = 100000, maxit=1000, trControl = nnet_ctrl, tuneGrid = nnet_tunegrid)
+```
+
+Predictions on vaidation data
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+##Make predictions and show confustion matrix
+pred_nnet <- predict(model_nnet, newdata=validate_testset)
+confusionMatrix(pred_nnet,validate$label)
+```
+
+Challenge predictions
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+pred_nnet <- predict(model_nnet, newdata=testData)
+
+digitRecSubmission_nnet <- data_frame(ImageId = 1:28000, Label = (as.numeric(pred_net)-1))
+write.csv(digitRecSubmission_nnet, file = "digitRec_nnet.csv", row.names = FALSE)
+
+```
+
+
+
+
+
+
+
 
